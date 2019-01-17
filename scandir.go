@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 // same default value. They must be set up with an init function.
 var rootdir string
 var dbfile string
+var datesuffixed bool
 
 // Walker structure for referencing SQLite DB during file tree traversal
 type Walker struct {
@@ -57,15 +59,18 @@ type Files struct {
 
 func init() {
 	const (
-		defaultRoot = "."
-		rootUsage   = "the top `directory` to be parsed"
-		defaultDB   = "./files.db"
-		DBUsage     = "the SQLite database `file`"
+		defaultRoot         = "."
+		rootUsage           = "the top `directory` to be parsed"
+		defaultDB           = "./files.db"
+		DBUsage             = "the SQLite database `file`"
+		defaultDateSuffixed = false
+		DateSuffixUsage     = "use date suffix in the form YYYYMMDD"
 	)
 	flag.StringVar(&rootdir, "rootdir", defaultRoot, rootUsage)
 	flag.StringVar(&rootdir, "r", defaultRoot, rootUsage+" (shorthand)")
 	flag.StringVar(&dbfile, "db", defaultDB, DBUsage)
 	flag.StringVar(&dbfile, "d", defaultDB, DBUsage+" (shorthand)")
+	flag.BoolVar(&datesuffixed, "D", defaultDateSuffixed, DateSuffixUsage)
 }
 
 func checkErr(err error) {
@@ -154,6 +159,18 @@ func main() {
 	// Were some args set ?
 	// fmt.Println("Args:", flag.NArg())
 	fmt.Println("Parsing rootdir:", rootdir)
+
+	// YYYYMMDD format
+	date_suffix := strings.Replace(strings.Split(time.Now().Format(time.RFC3339), "T")[0], "-", "", -1)
+	if datesuffixed {
+		absfile, err := filepath.Abs(dbfile)
+		checkErr(err)
+		dir, file := filepath.Split(absfile)
+		ext := filepath.Ext(dbfile)
+		rexp := regexp.MustCompile(ext + "$")
+		checkErr(err)
+		dbfile = filepath.Join(dir, rexp.ReplaceAllString(file, "")+"-"+date_suffix+ext)
+	}
 
 	db, err := gorm.Open("sqlite3", dbfile)
 	checkErr(err)
