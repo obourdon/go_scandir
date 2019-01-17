@@ -1,8 +1,13 @@
 package main
 
 import (
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"hash"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -55,6 +60,9 @@ type Files struct {
 	Gid   uint32 `gorm:"NOT NULL"`
 	Dev   int32
 	Links uint16
+
+	MD5Sum    string
+	SHA256Sum string
 }
 
 func init() {
@@ -79,6 +87,20 @@ func checkErr(err error) {
 	}
 }
 
+// Compute checksum of given regular file according to hashing parameter
+func CheckSum(path string, hasher hash.Hash) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// File entry visiting function
 func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// Get dirname and basename/filename
 	ldir, lfile := filepath.Split(path)
@@ -98,50 +120,44 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// Use reflection to see if Birthtimespec field exists in struct
 	s := reflect.Indirect(reflect.ValueOf(stat))
 	f1 := s.FieldByName("Birthtimespec")
+	// Basic file structure filled in
+	newFile := &Files{
+		Path:     path,
+		Dir:      ldir,
+		File:     lfile,
+		Ext:      lext,
+		Inserted: w.Now,
+		Lastseen: w.Now,
+		Modified: mtime,
+		Changed:  ctime,
+		Accessed: atime,
+		Size:     f.Size(),
+		Mode:     uint32(f.Mode()),
+		Uid:      stat.Uid,
+		Gid:      stat.Gid,
+		Dev:      stat.Dev,
+		Links:    stat.Nlink,
+	}
+	// Add created time if this exists
+	if f1.IsValid() {
+		btime, _ := stat.Birthtimespec.Unix()
+		newFile.Created = btime
+	}
+	// Checksums for regular files only
+	if (f.Mode() & os.ModeType) == 0 {
+		sha256sum, err := CheckSum(path, sha256.New())
+		checkErr(err)
+		md5sum, err := CheckSum(path, md5.New())
+		checkErr(err)
+		newFile.MD5Sum = md5sum
+		newFile.SHA256Sum = sha256sum
+	}
 	// Insert into DB, fields can then be retrieved with the following statements
 	//
 	// select printf("%o",mode) from files;
 	//  select datetime(modified, 'unixepoch'),datetime(changed, 'unixepoch'),datetime(accessed, 'unixepoch'),datetime(created, 'unixepoch') from files;
 	// select *,path,size,printf("%o",mode),datetime(modified, 'unixepoch'),datetime(created, 'unixepoch') from files where file='ScanDir';
-	if f1.IsValid() {
-		btime, _ := stat.Birthtimespec.Unix()
-		w.Db.Create(&Files{
-			Path:     path,
-			Dir:      ldir,
-			File:     lfile,
-			Ext:      lext,
-			Inserted: w.Now,
-			Lastseen: w.Now,
-			Modified: mtime,
-			Changed:  ctime,
-			Accessed: atime,
-			Created:  btime,
-			Size:     f.Size(),
-			Mode:     uint32(f.Mode()),
-			Uid:      stat.Uid,
-			Gid:      stat.Gid,
-			Dev:      stat.Dev,
-			Links:    stat.Nlink,
-		})
-	} else {
-		w.Db.Create(&Files{
-			Path:     path,
-			Dir:      ldir,
-			File:     lfile,
-			Ext:      lext,
-			Inserted: w.Now,
-			Lastseen: w.Now,
-			Modified: mtime,
-			Changed:  ctime,
-			Accessed: atime,
-			Size:     f.Size(),
-			Mode:     uint32(f.Mode()),
-			Uid:      stat.Uid,
-			Gid:      stat.Gid,
-			Dev:      stat.Dev,
-			Links:    stat.Nlink,
-		})
-	}
+	w.Db.Create(newFile)
 	return nil
 }
 
