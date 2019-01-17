@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"flag"
 	"fmt"
 	"os"
@@ -11,13 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/jinzhu/gorm"
+	_ "github.com/jinzhu/gorm/dialects/sqlite"
 )
 
-// Example 1: A single string flag called "species" with default value "gopher".
+// flag Example 1: A single string flag called "species" with default value "gopher".
 // var rootdir = flag.String("rootdir", ".", "the top `directory` to be parsed")
 
-// Example 2: Two flags sharing a variable, so we can have a shorthand.
+// flag Example 2: Two flags sharing a variable, so we can have a shorthand.
 // The order of initialization is undefined, so make sure both use the
 // same default value. They must be set up with an init function.
 var rootdir string
@@ -25,8 +25,34 @@ var dbfile string
 
 // Walker structure for referencing SQLite DB during file tree traversal
 type Walker struct {
-	Db  *sql.DB
+	Db  *gorm.DB
 	Now int64
+}
+
+type Files struct {
+	gorm.Model
+	//Id int `gorm:"PRIMARY_KEY;AUTO_INCREMENT;NOT NULL"`
+
+	Path string `gorm:"NOT NULL"`
+	Dir  string `gorm:"NOT NULL"`
+	File string `gorm:"NOT NULL"`
+	Ext  string
+
+	Inserted int64 `gorm:"NOT NULL"`
+	Deleted  int64
+	Lastseen int64 `gorm:"NOT NULL"`
+
+	Modified int64 `gorm:"NOT NULL"`
+	Changed  int64 `gorm:"NOT NULL"`
+	Accessed int64 `gorm:"NOT NULL"`
+	Created  int64
+
+	Size  int64  `gorm:"NOT NULL"`
+	Mode  uint32 `gorm:"NOT NULL"`
+	Uid   uint32 `gorm:"NOT NULL"`
+	Gid   uint32 `gorm:"NOT NULL"`
+	Dev   int32
+	Links uint16
 }
 
 func init() {
@@ -51,8 +77,8 @@ func checkErr(err error) {
 func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// Get dirname and basename/filename
 	ldir, lfile := filepath.Split(path)
-	// Get extension (empty string if none)
-	lext := filepath.Ext(lfile)
+	// Get extension (empty string if none) and convert to lower case
+	lext := strings.ToLower(filepath.Ext(lfile))
 	// Retrieve full (l)stat info struct
 	stat, ok := f.Sys().(*syscall.Stat_t)
 	// Should never happen
@@ -60,29 +86,57 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 		panic(fmt.Sprintf("Not a stat_t: %s => %v", path, f.Sys()))
 	}
 	// fmt.Printf("Stat: %#v\n", stat)
-	// Accessed and Changed timestamps
+	// Modified, Accessed and Changed timestamps
+	mtime := f.ModTime().Unix()
 	atime, _ := stat.Atimespec.Unix()
 	ctime, _ := stat.Ctimespec.Unix()
 	// Use reflection to see if Birthtimespec field exists in struct
 	s := reflect.Indirect(reflect.ValueOf(stat))
 	f1 := s.FieldByName("Birthtimespec")
-	//btime := int64(-1)
-	btime := int64(-1)
-	if f1.IsValid() {
-		btime, _ = stat.Birthtimespec.Unix()
-	}
-
-	// Prepare insertion statement
-	stmt, err := w.Db.Prepare("INSERT INTO files VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-	checkErr(err)
-
 	// Insert into DB, fields can then be retrieved with the following statements
 	//
 	// select printf("%o",mode) from files;
 	//  select datetime(modified, 'unixepoch'),datetime(changed, 'unixepoch'),datetime(accessed, 'unixepoch'),datetime(created, 'unixepoch') from files;
-	_, err = stmt.Exec(path, ldir, lfile, lext, w.Now, sql.NullString{}, w.Now, f.ModTime().Unix(), ctime, atime, btime, f.Size(), f.Mode(), stat.Uid, stat.Gid, stat.Dev, stat.Nlink)
-	checkErr(err)
-
+	// select *,path,size,printf("%o",mode),datetime(modified, 'unixepoch'),datetime(created, 'unixepoch') from files where file='ScanDir';
+	if f1.IsValid() {
+		btime, _ := stat.Birthtimespec.Unix()
+		w.Db.Create(&Files{
+			Path:     path,
+			Dir:      ldir,
+			File:     lfile,
+			Ext:      lext,
+			Inserted: w.Now,
+			Lastseen: w.Now,
+			Modified: mtime,
+			Changed:  ctime,
+			Accessed: atime,
+			Created:  btime,
+			Size:     f.Size(),
+			Mode:     uint32(f.Mode()),
+			Uid:      stat.Uid,
+			Gid:      stat.Gid,
+			Dev:      stat.Dev,
+			Links:    stat.Nlink,
+		})
+	} else {
+		w.Db.Create(&Files{
+			Path:     path,
+			Dir:      ldir,
+			File:     lfile,
+			Ext:      lext,
+			Inserted: w.Now,
+			Lastseen: w.Now,
+			Modified: mtime,
+			Changed:  ctime,
+			Accessed: atime,
+			Size:     f.Size(),
+			Mode:     uint32(f.Mode()),
+			Uid:      stat.Uid,
+			Gid:      stat.Gid,
+			Dev:      stat.Dev,
+			Links:    stat.Nlink,
+		})
+	}
 	return nil
 }
 
@@ -101,49 +155,15 @@ func main() {
 	// fmt.Println("Args:", flag.NArg())
 	fmt.Println("Parsing rootdir:", rootdir)
 
-	db, err := sql.Open("sqlite3", dbfile)
+	db, err := gorm.Open("sqlite3", dbfile)
 	checkErr(err)
+	defer db.Close()
 
-	files_tbl_create_stmt := "CREATE TABLE files (" +
-		"id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
-		"path TXT NOT NULL, dir TXT NOT NULL, file TXT NOT NULL, ext TXT, " +
-		"inserted INTEGER NOT NULL, deleted INTEGER, last_seen INTEGER NOT NULL, " +
-		"modified INTEGER, changed INTEGER, accessed INTEGER, created INTEGER, " +
-		"size INTEGER NOT NULL, mode INTEGER NOT NULL, uid INTEGER NOT NULL, gid INTEGER NOT NULL, dev INTEGER, links INTEGER" +
-		")"
+	// Migrate the schema
+	db.AutoMigrate(&Files{})
+
 	// tbls, err := db.Exec("PRAGMA table_info('files')")
-	create_tables := true
-	tbls, err := db.Query("SELECT sql FROM sqlite_master WHERE name='files'")
-	checkErr(err)
-	var tbl_def string
-	for tbls.Next() {
-		err = tbls.Scan(&tbl_def)
-		if strings.ToLower(tbl_def) != strings.ToLower(files_tbl_create_stmt) {
-			panic("files table definition do not match")
-		} else {
-			create_tables = false
-		}
-		// fmt.Printf("Tables %#v\n", tbl_def)
-	}
-
-	// No need to access DB to get current timestamp
-	// Furthermore it would require Now type to be string above
-	// or converted to int64 hereafter
-	//
-	/* now, err := db.Query("SELECT STRFTIME('%s','NOW');")
-	checkErr(err)
-	var now_timestamp string
-	for now.Next() {
-		err = now.Scan(&now_timestamp)
-		// fmt.Printf("Now %#v\n", now_timestamp)
-	}
-	fmt.Printf("Now %#v %#v\n", now_timestamp, time.Now().Unix()) */
-
-	if create_tables {
-		_, err = db.Exec(files_tbl_create_stmt)
-		checkErr(err)
-	}
-
+	// tbls, err := db.Query("SELECT sql FROM sqlite_master WHERE name='files'")
 	w := &Walker{
 		Db:  db,
 		Now: time.Now().Unix(),
