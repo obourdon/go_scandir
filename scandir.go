@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -62,8 +64,10 @@ type Files struct {
 	Dev   int32
 	Links uint16
 
-	MD5Sum    string
-	SHA256Sum string
+	MD5Sum      string
+	SHA256Sum   string
+	MimeType    string
+	ExtMimeType string
 }
 
 // Hasher structure containing Files structure field to be assigned and hashing function
@@ -92,6 +96,23 @@ func checkErr(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func GetFileContentType(out *os.File) (string, error) {
+
+	// Only the first 512 bytes are used to sniff the content type.
+	buffer := make([]byte, 512)
+
+	_, err := out.Read(buffer)
+	if err != nil {
+		return "", err
+	}
+
+	// Use the net/http package's handy DectectContentType function. Always returns a valid
+	// content-type by returning "application/octet-stream" if no others seemed to match.
+	contentType := http.DetectContentType(buffer)
+
+	return contentType, nil
 }
 
 func CheckSumHash(retFile *Files, rd io.Reader, hashes ...Hasher) error {
@@ -138,6 +159,11 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	ldir, lfile := filepath.Split(path)
 	// Get extension (empty string if none) and convert to lower case
 	lext := strings.ToLower(filepath.Ext(lfile))
+	// Basically determining file type by extension might be tricky/wrong
+	// however for some files like epub, mobi, bz2, ... where HTTP mime type gives
+	// application/octet-stream this might be usefull
+	// even works for txt, odp, js, html, ...
+	extmime := mime.TypeByExtension(lext)
 	// Retrieve full (l)stat info struct
 	stat, ok := f.Sys().(*syscall.Stat_t)
 	// Should never happen
@@ -154,21 +180,22 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	f1 := s.FieldByName("Birthtimespec")
 	// Basic file structure filled in
 	newFile := &Files{
-		Path:     path,
-		Dir:      ldir,
-		File:     lfile,
-		Ext:      lext,
-		Inserted: time.Now().Unix(),
-		Lastseen: w.Now,
-		Modified: mtime,
-		Changed:  ctime,
-		Accessed: atime,
-		Size:     f.Size(),
-		Mode:     uint32(f.Mode()),
-		Uid:      stat.Uid,
-		Gid:      stat.Gid,
-		Dev:      stat.Dev,
-		Links:    stat.Nlink,
+		Path:        path,
+		Dir:         ldir,
+		File:        lfile,
+		Ext:         lext,
+		Inserted:    time.Now().Unix(),
+		Lastseen:    w.Now,
+		Modified:    mtime,
+		Changed:     ctime,
+		Accessed:    atime,
+		Size:        f.Size(),
+		Mode:        uint32(f.Mode()),
+		Uid:         stat.Uid,
+		Gid:         stat.Gid,
+		Dev:         stat.Dev,
+		Links:       stat.Nlink,
+		ExtMimeType: extmime,
 	}
 	// Add created time if this exists
 	if f1.IsValid() {
@@ -188,6 +215,12 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 		defer f.Close()
 		err1 := CheckSumHash(newFile, f, hashes...)
 		checkErr(err1)
+		// Rewind file
+		f.Seek(0, 0)
+		contentType, err2 := GetFileContentType(f)
+		if err2 == nil {
+			newFile.MimeType = contentType
+		}
 	}
 	// Insert into DB, fields can then be retrieved with the following statements
 	//
