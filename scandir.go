@@ -32,8 +32,9 @@ var notdatesuffixed bool
 
 // Walker structure for referencing SQLite DB during file tree traversal
 type Walker struct {
-	Db  *gorm.DB
-	Now int64
+	Db      *gorm.DB
+	RootDir string
+	Now     int64
 }
 
 type Files struct {
@@ -65,6 +66,12 @@ type Files struct {
 	SHA256Sum string
 }
 
+// Hasher structure containing Files structure field to be assigned and hashing function
+type Hasher struct {
+	field  string
+	hasher hash.Hash
+}
+
 func init() {
 	const (
 		defaultRoot            = "."
@@ -87,17 +94,42 @@ func checkErr(err error) {
 	}
 }
 
-// Compute checksum of given regular file according to hashing parameter
-func CheckSum(path string, hasher hash.Hash) (string, error) {
-	f, err := os.Open(path)
+func CheckSumHash(retFile *Files, rd io.Reader, hashes ...Hasher) error {
+	// Build array of hash functions
+	hash_funcs := make([]io.Writer, len(hashes))
+	for idx, h := range hashes {
+		hash_funcs[idx] = h.hasher
+	}
+
+	// For optimum speed, Getpagesize returns the underlying system's memory page size.
+	//pagesize := os.Getpagesize()
+
+	// wraps the Reader object into a new buffered reader to read the files in chunks
+	// and buffering them for performance.
+	//reader := bufio.NewReaderSize(rd, pagesize)
+
+	// creates a multiplexer Writer object that will duplicate all write
+	// operations when copying data from source into all different hashing algorithms
+	// at the same time
+	multiWriter := io.MultiWriter(hash_funcs...)
+
+	// Using a buffered reader, this will write to the writer multiplexer
+	// so we only traverse through the file once, and can calculate all hashes
+	// in a single byte buffered scan pass.
+	//
+	_, err := io.Copy(multiWriter, rd)
 	if err != nil {
-		return "", err
+		panic(err.Error())
 	}
-	defer f.Close()
-	if _, err := io.Copy(hasher, f); err != nil {
-		return "", err
+
+	// Assign return of each hash function to appropriate structure field
+	for idx, h := range hashes {
+		v := reflect.ValueOf(retFile).Elem().FieldByName(h.field)
+		if v.IsValid() {
+			v.SetString(hex.EncodeToString((hash_funcs[idx].(hash.Hash)).Sum(nil)))
+		}
 	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return nil
 }
 
 // File entry visiting function
@@ -145,12 +177,17 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	}
 	// Checksums for regular files only
 	if (f.Mode() & os.ModeType) == 0 {
-		sha256sum, err := CheckSum(path, sha256.New())
-		checkErr(err)
-		md5sum, err := CheckSum(path, md5.New())
-		checkErr(err)
-		newFile.MD5Sum = md5sum
-		newFile.SHA256Sum = sha256sum
+		hashes := []Hasher{
+			{field: "MD5Sum", hasher: md5.New()},
+			{field: "SHA256Sum", hasher: sha256.New()},
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		err1 := CheckSumHash(newFile, f, hashes...)
+		checkErr(err1)
 	}
 	// Insert into DB, fields can then be retrieved with the following statements
 	//
@@ -176,9 +213,9 @@ func main() {
 	// fmt.Println("Args:", flag.NArg())
 	fmt.Println("Parsing rootdir:", rootdir)
 
-	// YYYYMMDD format
-	date_suffix := strings.Replace(strings.Split(time.Now().Format(time.RFC3339), "T")[0], "-", "", -1)
 	if !notdatesuffixed {
+		// YYYYMMDD format
+		date_suffix := strings.Replace(strings.Split(time.Now().Format(time.RFC3339), "T")[0], "-", "", -1)
 		absfile, err := filepath.Abs(dbfile)
 		checkErr(err)
 		dir, file := filepath.Split(absfile)
@@ -197,13 +234,16 @@ func main() {
 
 	// tbls, err := db.Exec("PRAGMA table_info('files')")
 	// tbls, err := db.Query("SELECT sql FROM sqlite_master WHERE name='files'")
-	w := &Walker{
-		Db:  db,
-		Now: time.Now().Unix(),
-	}
-
 	absRootdir, err := filepath.Abs(rootdir)
 	checkErr(err)
+
+	// Initialize walk structure to be passed down
+	// db handle and scan start date
+	w := &Walker{
+		Db:      db,
+		RootDir: absRootdir,
+		Now:     time.Now().Unix(),
+	}
 
 	err = filepath.Walk(absRootdir, w.Visit)
 	checkErr(err)
