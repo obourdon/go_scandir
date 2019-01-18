@@ -28,7 +28,7 @@ import (
 // same default value. They must be set up with an init function.
 var rootdir string
 var dbfile string
-var datesuffixed bool
+var notdatesuffixed bool
 
 // Walker structure for referencing SQLite DB during file tree traversal
 type Walker struct {
@@ -67,18 +67,18 @@ type Files struct {
 
 func init() {
 	const (
-		defaultRoot         = "."
-		rootUsage           = "the top `directory` to be parsed"
-		defaultDB           = "./files.db"
-		DBUsage             = "the SQLite database `file`"
-		defaultDateSuffixed = false
-		DateSuffixUsage     = "use date suffix in the form YYYYMMDD"
+		defaultRoot            = "."
+		rootUsage              = "the top `directory` to be parsed"
+		defaultDB              = "./files.db"
+		DBUsage                = "the SQLite database `file`"
+		defaultNotDateSuffixed = false
+		NotDateSuffixUsage     = "don't use date suffix in the form YYYYMMDD for SQLite database file"
 	)
 	flag.StringVar(&rootdir, "rootdir", defaultRoot, rootUsage)
 	flag.StringVar(&rootdir, "r", defaultRoot, rootUsage+" (shorthand)")
 	flag.StringVar(&dbfile, "db", defaultDB, DBUsage)
 	flag.StringVar(&dbfile, "d", defaultDB, DBUsage+" (shorthand)")
-	flag.BoolVar(&datesuffixed, "D", defaultDateSuffixed, DateSuffixUsage)
+	flag.BoolVar(&notdatesuffixed, "D", defaultNotDateSuffixed, NotDateSuffixUsage)
 }
 
 func checkErr(err error) {
@@ -126,7 +126,7 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 		Dir:      ldir,
 		File:     lfile,
 		Ext:      lext,
-		Inserted: w.Now,
+		Inserted: time.Now().Unix(),
 		Lastseen: w.Now,
 		Modified: mtime,
 		Changed:  ctime,
@@ -178,7 +178,7 @@ func main() {
 
 	// YYYYMMDD format
 	date_suffix := strings.Replace(strings.Split(time.Now().Format(time.RFC3339), "T")[0], "-", "", -1)
-	if datesuffixed {
+	if !notdatesuffixed {
 		absfile, err := filepath.Abs(dbfile)
 		checkErr(err)
 		dir, file := filepath.Split(absfile)
