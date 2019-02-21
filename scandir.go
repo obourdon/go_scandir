@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/obourdon/magicmime"
+
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/sqlite"
 )
@@ -64,16 +66,22 @@ type Files struct {
 	Dev   int32
 	Links uint16
 
-	MD5Sum      string
-	SHA256Sum   string
-	MimeType    string
-	ExtMimeType string
+	MD5Sum        string
+	SHA256Sum     string
+	MagicMimeType string
+	MagicCharset  string
+	MimeType      string
+	MimeCharset   string
+	ExtMimeType   string
+	Test          string
 }
 
 // Hasher structure containing Files structure field to be assigned and hashing function
+// as well as converter function
 type Hasher struct {
 	field  string
 	hasher hash.Hash
+	converter func([]byte)string
 }
 
 func init() {
@@ -147,10 +155,14 @@ func CheckSumHash(retFile *Files, rd io.Reader, hashes ...Hasher) error {
 	for idx, h := range hashes {
 		v := reflect.ValueOf(retFile).Elem().FieldByName(h.field)
 		if v.IsValid() {
-			v.SetString(hex.EncodeToString((hash_funcs[idx].(hash.Hash)).Sum(nil)))
+			v.SetString(hashes[idx].converter((hash_funcs[idx].(hash.Hash)).Sum(nil)))
 		}
 	}
 	return nil
+}
+
+func upperHex(content []byte) string {
+	return strings.ToUpper(hex.EncodeToString(content))
 }
 
 // File entry visiting function
@@ -164,6 +176,14 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// application/octet-stream this might be usefull
 	// even works for txt, odp, js, html, ...
 	extmime := mime.TypeByExtension(lext)
+	lmimetype, err := magicmime.TypeByFile(path)
+	checkErr(err)
+	lmimeinfos := strings.Split(lmimetype, "; ")
+	magicmimetype := lmimeinfos[0]
+	magiccharset := ""
+	if len(lmimeinfos) > 1 {
+		magiccharset = lmimeinfos[1]
+	}
 	// Retrieve full (l)stat info struct
 	stat, ok := f.Sys().(*syscall.Stat_t)
 	// Should never happen
@@ -180,22 +200,24 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	f1 := s.FieldByName("Birthtimespec")
 	// Basic file structure filled in
 	newFile := &Files{
-		Path:        path,
-		Dir:         ldir,
-		File:        lfile,
-		Ext:         lext,
-		Inserted:    time.Now().Unix(),
-		Lastseen:    w.Now,
-		Modified:    mtime,
-		Changed:     ctime,
-		Accessed:    atime,
-		Size:        f.Size(),
-		Mode:        uint32(f.Mode()),
-		Uid:         stat.Uid,
-		Gid:         stat.Gid,
-		Dev:         stat.Dev,
-		Links:       stat.Nlink,
-		ExtMimeType: extmime,
+		Path:			path,
+		Dir:			ldir,
+		File:			lfile,
+		Ext:			lext,
+		Inserted:		time.Now().Unix(),
+		Lastseen:		w.Now,
+		Modified:		mtime,
+		Changed:		ctime,
+		Accessed:		atime,
+		Size:			f.Size(),
+		Mode:			uint32(f.Mode()),
+		Uid:			stat.Uid,
+		Gid:			stat.Gid,
+		Dev:			stat.Dev,
+		Links:			stat.Nlink,
+		MagicMimeType:	magicmimetype,
+		MagicCharset:	magiccharset,
+		ExtMimeType:	extmime,
 	}
 	// Add created time if this exists
 	if f1.IsValid() {
@@ -205,8 +227,9 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// Checksums for regular files only
 	if (f.Mode() & os.ModeType) == 0 {
 		hashes := []Hasher{
-			{field: "MD5Sum", hasher: md5.New()},
-			{field: "SHA256Sum", hasher: sha256.New()},
+			{field: "MD5Sum", hasher: md5.New(), converter: hex.EncodeToString},
+			{field: "SHA256Sum", hasher: sha256.New(), converter: hex.EncodeToString},
+			{field: "Test", hasher: sha256.New(), converter: upperHex},
 		}
 		f, err := os.Open(path)
 		if err != nil {
@@ -219,7 +242,11 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 		f.Seek(0, 0)
 		contentType, err2 := GetFileContentType(f)
 		if err2 == nil {
-			newFile.MimeType = contentType
+			lcontentinfos := strings.Split(contentType, "; ")
+			newFile.MimeType = lcontentinfos[0]
+			if len(lcontentinfos) > 1 {
+				newFile.MimeCharset = lcontentinfos[1]
+			}
 		}
 	}
 	// Insert into DB, fields can then be retrieved with the following statements
@@ -245,6 +272,12 @@ func main() {
 	// Were some args set ?
 	// fmt.Println("Args:", flag.NArg())
 	fmt.Println("Parsing rootdir:", rootdir)
+
+	// can add magicmime.MAGIC_ERROR | magicmime.MAGIC_CONTINUE too
+	if err := magicmime.Open(magicmime.MAGIC_MIME); err != nil {
+		checkErr(err)
+	}
+	defer magicmime.Close()
 
 	if !notdatesuffixed {
 		// YYYYMMDD format
