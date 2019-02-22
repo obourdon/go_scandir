@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	http_magic_hash "./mime_hash/http"
+
 	"github.com/obourdon/magicmime"
 
 	"github.com/jinzhu/gorm"
@@ -173,6 +175,15 @@ func upperHex(content []byte) []string {
 	return []string{strings.ToUpper(hex.EncodeToString(content)), "dummy"}
 }
 
+func splitSemiColon(content []byte) []string {
+	lcontentinfos := strings.Split(string(content), "; ")
+	charset := ""
+	if len(lcontentinfos) > 1 {
+		charset = lcontentinfos[1]
+	}
+	return []string{lcontentinfos[0], charset}
+}
+
 // File entry visiting function
 func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// Get dirname and basename/filename
@@ -237,7 +248,7 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 		hashes := []Hasher{
 			{fields: []string{"MD5Sum"}, hasher: md5.New(), converter: hexString},
 			{fields: []string{"SHA256Sum"}, hasher: sha256.New(), converter: hexString},
-			{fields: []string{"Test1", "Test2"}, hasher: sha256.New(), converter: upperHex},
+			{fields: []string{"MimeType", "MimeCharset"}, hasher: http_magic_hash.New(), converter: splitSemiColon},
 		}
 		f, err := os.Open(path)
 		if err != nil {
@@ -251,9 +262,9 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 		contentType, err2 := GetFileContentType(f)
 		if err2 == nil {
 			lcontentinfos := strings.Split(contentType, "; ")
-			newFile.MimeType = lcontentinfos[0]
+			newFile.Test1 = lcontentinfos[0]
 			if len(lcontentinfos) > 1 {
-				newFile.MimeCharset = lcontentinfos[1]
+				newFile.Test2 = lcontentinfos[1]
 			}
 		}
 	}
@@ -262,6 +273,8 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// select printf("%o",mode) from files;
 	//  select datetime(modified, 'unixepoch'),datetime(changed, 'unixepoch'),datetime(accessed, 'unixepoch'),datetime(created, 'unixepoch') from files;
 	// select *,path,size,printf("%o",mode),datetime(modified, 'unixepoch'),datetime(created, 'unixepoch') from files where file='ScanDir';
+	// file and their MD5s
+	// select printf("%x",mode),printf("%o",mode),mode,path,md5_sum from files where (mode & 0x80000000)==0;
 	w.Db.Create(newFile)
 	return nil
 }
