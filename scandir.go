@@ -73,15 +73,16 @@ type Files struct {
 	MimeType      string
 	MimeCharset   string
 	ExtMimeType   string
-	Test          string
+	Test1         string
+	Test2         string
 }
 
 // Hasher structure containing Files structure field to be assigned and hashing function
 // as well as converter function
 type Hasher struct {
-	field  string
+	fields  []string
 	hasher hash.Hash
-	converter func([]byte)string
+	converter func([]byte)[]string
 }
 
 func init() {
@@ -153,16 +154,23 @@ func CheckSumHash(retFile *Files, rd io.Reader, hashes ...Hasher) error {
 
 	// Assign return of each hash function to appropriate structure field
 	for idx, h := range hashes {
-		v := reflect.ValueOf(retFile).Elem().FieldByName(h.field)
-		if v.IsValid() {
-			v.SetString(hashes[idx].converter((hash_funcs[idx].(hash.Hash)).Sum(nil)))
+		ret := hashes[idx].converter((hash_funcs[idx].(hash.Hash)).Sum(nil))
+		for ix, f := range h.fields {
+			v := reflect.ValueOf(retFile).Elem().FieldByName(f)
+			if v.IsValid() {
+				v.SetString(ret[ix])
+			}
 		}
 	}
 	return nil
 }
 
-func upperHex(content []byte) string {
-	return strings.ToUpper(hex.EncodeToString(content))
+func hexString(content []byte) []string {
+	return []string{hex.EncodeToString(content)}
+}
+
+func upperHex(content []byte) []string {
+	return []string{strings.ToUpper(hex.EncodeToString(content)), "dummy"}
 }
 
 // File entry visiting function
@@ -227,9 +235,9 @@ func (w *Walker) Visit(path string, f os.FileInfo, err error) error {
 	// Checksums for regular files only
 	if (f.Mode() & os.ModeType) == 0 {
 		hashes := []Hasher{
-			{field: "MD5Sum", hasher: md5.New(), converter: hex.EncodeToString},
-			{field: "SHA256Sum", hasher: sha256.New(), converter: hex.EncodeToString},
-			{field: "Test", hasher: sha256.New(), converter: upperHex},
+			{fields: []string{"MD5Sum"}, hasher: md5.New(), converter: hexString},
+			{fields: []string{"SHA256Sum"}, hasher: sha256.New(), converter: hexString},
+			{fields: []string{"Test1", "Test2"}, hasher: sha256.New(), converter: upperHex},
 		}
 		f, err := os.Open(path)
 		if err != nil {
